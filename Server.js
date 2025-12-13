@@ -1,9 +1,11 @@
-// server.js (FINAL VERSION - CRITICAL FIX: Chunk Count Trigger)
+// server.js (RESTORED & FIXED FOR PREDICTION)
 
 // --- REQUIRED PURE JS MODULES ---
 const WebSocket = require('ws');
 const http = require('http'); 
-const fetch = require('node-fetch'); 
+// CRITICAL FIX FOR FETCH ERROR: Ensure fetch is available globally
+const nodeFetch = require('node-fetch'); 
+global.fetch = nodeFetch; 
 const { AudioContext } = require('web-audio-api'); 
 const tf = require('@tensorflow/tfjs'); 
 require('@tensorflow/tfjs-backend-cpu'); 
@@ -27,7 +29,7 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getDatabase(firebaseApp);
 
-// --- 2. AI MODEL CONFIGURATION (PURE JS SERVER) ---
+// --- 2. AI MODEL CONFIGURATION ---
 const MODEL_URL = "https://teachablemachine.withgoogle.com/models/7KA0738CC/model.json";
 const CLASS_LABELS = ["_background_noise_", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7", "Class 8", "Class 9"];
 const NUM_FRAMES = 43;
@@ -47,8 +49,7 @@ let browserClient = null;
 let audioChunks = [];
 let processingFlag = false; // Prevents double-processing
 
-// --- 4. AI HELPER FUNCTIONS (No Change) ---
-
+// --- 4. AI HELPER FUNCTIONS (Unchanged) ---
 function normalizeTensor(tensor) {
     const d = EPSILON;
     return tf.tidy(() => {
@@ -59,7 +60,6 @@ function normalizeTensor(tensor) {
         return tf.div(diff, tf.add(tf.sqrt(a), d));
     });
 }
-
 async function initializeModel() {
     console.log("Loading AI model on server using pure JavaScript backend...");
     tf.setBackend('cpu');
@@ -71,7 +71,8 @@ async function initializeModel() {
     }
 }
 
-// --- 5. CORE AI PREDICTION LOGIC (No Change) ---
+
+// --- 5. CORE AI PREDICTION LOGIC ---
 
 async function runPrediction(audioDataUrl, ws) {
     if (!aiModel) {
@@ -82,14 +83,15 @@ async function runPrediction(audioDataUrl, ws) {
     try {
         console.log("Starting server-side prediction (Pure JS backend)...");
 
-        const response = await fetch(audioDataUrl);
+        // Uses global.fetch (fixed above)
+        const response = await global.fetch(audioDataUrl); 
         const arrayBuffer = await response.arrayBuffer();
 
         const audioBuffer = await new Promise((resolve, reject) => {
             audioContext.decodeAudioData(arrayBuffer, resolve, reject);
         });
 
-        // --- Spectrogram and Prediction Setup ---
+        // --- Prediction logic (unchanged) ---
         const targetSampleRate = 16000;
         const fftSize = 1024;
         const rawAudioData = audioBuffer.getChannelData(0);
@@ -102,7 +104,6 @@ async function runPrediction(audioDataUrl, ws) {
 
         // C. Prediction Loop
         for (let i = 0; i < totalWindows; i++) {
-
             tf.tidy(() => {
                 const startSample = i * audioBuffer.sampleRate;
                 const endSample = startSample + audioBuffer.sampleRate;
@@ -165,21 +166,20 @@ async function runPrediction(audioDataUrl, ws) {
     }
 }
 
+
 // --- 6. AUDIO PROCESSING (RAW PCM -> WAV -> FIREBASE) ---
 
-// Helper to construct a proper WAV header for the RAW PCM data
 function addWavHeader(samples, sampleRate, numChannels, bitDepth) {
     const byteRate = (sampleRate * numChannels * bitDepth) / 8;
     const blockAlign = (numChannels * bitDepth) / 8;
-    // We allocate the buffer size for the 44-byte header + the raw sample data size
-    const buffer = Buffer.alloc(44 + samples.length); 
+    const buffer = Buffer.alloc(44 + samples.length);
 
     buffer.write('RIFF', 0);
     buffer.writeUInt32LE(36 + samples.length, 4);
     buffer.write('WAVE', 8);
     buffer.write('fmt ', 12);
     buffer.writeUInt32LE(16, 16);
-    buffer.writeUInt16LE(1, 20); // Audio format (1 for PCM)
+    buffer.writeUInt16LE(1, 20); 
     buffer.writeUInt16LE(numChannels, 22);
     buffer.writeUInt32LE(sampleRate, 24);
     buffer.writeUInt32LE(byteRate, 28);
@@ -198,7 +198,7 @@ function processAndUploadAudio() {
         return;
     }
     
-    processingFlag = true; // Set flag to prevent re-entry
+    processingFlag = true; 
 
     const rawBuffer = Buffer.concat(audioChunks);
     const wavBuffer = addWavHeader(rawBuffer, 16000, 1, 16);
@@ -206,7 +206,6 @@ function processAndUploadAudio() {
 
     console.log(`Uploading to Firebase... Raw buffer size: ${rawBuffer.length} bytes.`);
     
-    // Clear the buffer after concatenation, ready for the next recording
     audioChunks = []; 
 
     set(ref(db, 'latest_recording'), {
@@ -225,12 +224,12 @@ function processAndUploadAudio() {
             console.error("Firebase upload error:", error);
         })
         .finally(() => {
-            processingFlag = false; // Reset flag after operation completes
+            processingFlag = false; 
         });
 }
 
 
-// --- 7. WEBSOCKET CONNECTION AND MESSAGE HANDLERS (CRITICAL FIX APPLIED HERE) ---
+// --- 7. WEBSOCKET CONNECTION AND MESSAGE HANDLERS (The Original Logic) ---
 
 wss.on('connection', (ws, req) => {
     const clientType = req.url.includes("ESP32") ? "ESP32" : "Browser";
@@ -248,23 +247,15 @@ wss.on('connection', (ws, req) => {
         if (clientType === "ESP32" && Buffer.isBuffer(message)) {
             audioChunks.push(message);
             console.log(`[ESP32] Received audio chunk. Chunk size: ${message.length} bytes. Total chunks: ${audioChunks.length}`); 
-            
-            // 🚨 CRITICAL FIX: Trigger processing immediately after the last expected chunk.
-            // A 10-second recording @ 16kHz, 16-bit mono results in ~316 chunks of 1024 bytes.
-            if (audioChunks.length >= 316 && !processingFlag) { 
-                console.log("!!! CRITICAL HIT (CHUNK COUNT): Last expected chunk received. Starting upload...");
-                processAndUploadAudio();
-                return; // Stop further processing this tick
-            }
             return;
         }
 
-        // B. Handle Text Data (Commands from ESP32 or Browser)
+        // B. Handle Text Data 
         let msgString = message.toString().trim();
 
-        // 1. Check for 'END_RECORDING' (Kept as a fallback/redundancy)
+        // 1. Check for 'END_RECORDING' (This is the original trigger)
         if (msgString === "END_RECORDING" && !processingFlag) {
-            console.log("!!! CRITICAL HIT (TEXT FALLBACK): END_RECORDING received. Starting upload..."); 
+            console.log("!!! CRITICAL HIT: END_RECORDING received. Starting upload..."); 
             processAndUploadAudio();
             return;
         }
@@ -284,8 +275,8 @@ wss.on('connection', (ws, req) => {
         // 3. Check for simple commands
         if (msgString === "START_RECORDING_REQUEST") {
             console.log("[Browser] Tell ESP32 to start recording...");
-            audioChunks = []; // Clear old audio buffer
-            processingFlag = false; // Reset flag for new recording
+            audioChunks = []; 
+            processingFlag = false; 
 
             if (esp32Client && esp32Client.readyState === WebSocket.OPEN) {
                 esp32Client.send("START"); 
@@ -302,17 +293,17 @@ wss.on('connection', (ws, req) => {
         console.log(`${clientType} disconnected`);
         if (clientType === "ESP32") esp32Client = null;
         if (clientType === "Browser") browserClient = null;
-        processingFlag = false; // Reset flag on disconnection
+        processingFlag = false; 
     });
 
     ws.on('error', (err) => {
         console.error(`WebSocket Error for ${clientType}:`, err.message);
-        processingFlag = false; // Reset flag on error
+        processingFlag = false; 
     });
 });
 
 // --- 8. START SERVER AND MODEL ---
 server.listen(port, () => {
     console.log(`Server listening on port ${port}`);
-    initializeModel(); // Load the model once at startup
+    initializeModel(); 
 });
