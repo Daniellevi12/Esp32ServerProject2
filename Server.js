@@ -1,4 +1,4 @@
-// server.js (PRODUCTION MODE - Firebase & WAV Restored)
+// server.js (FINAL WORKING VERSION - Production Ready)
 
 // --- REQUIRED PURE JS MODULES ---
 const WebSocket = require('ws');
@@ -34,9 +34,10 @@ let browserClient = null;
 let audioChunks = [];
 let processingFlag = false;
 
-// CRITICAL VALUES (5 seconds recording)
-const EXPECTED_CHUNK_COUNT = 159;
-const MONO_CHUNK_SIZE_BYTES = 1024; // C++ code sends 1024 bytes per chunk
+// CRITICAL VALUES (SYNCHRONIZED FOR 10 seconds recording)
+// (16000 Hz * 1 channel * 2 bytes/sample * 10 seconds) / 1024 bytes/chunk = 312.5 chunks
+const EXPECTED_CHUNK_COUNT = 313; 
+const MONO_CHUNK_SIZE_BYTES = 1024; 
 const EXPECTED_RAW_SIZE = EXPECTED_CHUNK_COUNT * MONO_CHUNK_SIZE_BYTES;
 
 
@@ -181,7 +182,6 @@ wss.on('connection', (ws, req) => {
                 if (browserClient) browserClient.send("ERROR: ESP32 not connected.");
             }
         }
-        // No need to check for "ESP32_CONNECTED" here as it's filtered above if sent as binary
     });
 
     ws.on('close', () => {
