@@ -205,6 +205,9 @@ function processAndUploadAudio() {
     const base64Audio = wavBuffer.toString('base64');
 
     console.log(`Uploading to Firebase... Raw buffer size: ${rawBuffer.length} bytes.`);
+    
+    // Clear the buffer after concatenation, ready for the next recording
+    audioChunks = []; 
 
     set(ref(db, 'latest_recording'), {
             timestamp: Date.now(),
@@ -224,7 +227,7 @@ function processAndUploadAudio() {
 }
 
 
-// --- 8. WEBSOCKET CONNECTION AND MESSAGE HANDLERS ---
+// --- 8. WEBSOCKET CONNECTION AND MESSAGE HANDLERS (FIXED WITH LOGGING) ---
 
 wss.on('connection', (ws, req) => {
     const clientType = req.url.includes("ESP32") ? "ESP32" : "Browser";
@@ -244,6 +247,8 @@ wss.on('connection', (ws, req) => {
             if (clientType === "ESP32") {
                 // ESP32 sends audio
                 audioChunks.push(message);
+                // *** CRITICAL DIAGNOSTIC LOG ***
+                console.log(`[ESP32] Received audio chunk. Chunk size: ${message.length} bytes. Total chunks: ${audioChunks.length}`); 
                 return;
             } else if (clientType === "Browser" && message.length < 50) {
                 // Browser sends command as small binary buffer, convert it.
@@ -277,14 +282,19 @@ wss.on('connection', (ws, req) => {
             audioChunks = []; // Clear old audio buffer
 
             if (esp32Client && esp32Client.readyState === WebSocket.OPEN) {
-                esp32Client.send("START");
+                // ** CRITICAL: This is the command that starts the ESP32 recording **
+                esp32Client.send("START"); 
                 console.log("SUCCESS: 'START' sent to ESP32.");
             } else {
                 console.log("ERROR: Cannot send 'START'. ESP32 client is not open or connected.");
             }
         } else if (msgString === "END_RECORDING") {
-            console.log("ESP32 finished. Processing WAV and uploading...");
+            // ** CRITICAL: This signal ensures the AI only works AFTER the WAV file is created **
+            console.log("!!! CRITICAL HIT: END_RECORDING RECEIVED. Starting upload..."); 
             processAndUploadAudio();
+        }
+        else if (msgString === "ESP32_CONNECTED") {
+             console.log("ESP32 identified itself."); 
         }
     });
 
