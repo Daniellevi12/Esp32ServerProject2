@@ -1,12 +1,12 @@
-// server.js (FINAL VERSION - INTEGRATED AI & FIREBASE)
+// server.js (FINAL VERSION - CRITICAL FIX FOR END_RECORDING MESSAGE)
 
 // --- REQUIRED PURE JS MODULES ---
 const WebSocket = require('ws');
-const http = require('http'); // Used for starting the server
-const fetch = require('node-fetch'); // To fetch the audio file from the Firebase URL
-const { AudioContext } = require('web-audio-api'); // Pure JS AudioContext for decoding
-const tf = require('@tensorflow/tfjs'); // Pure JS TensorFlow core
-require('@tensorflow/tfjs-backend-cpu'); // Explicitly use the CPU backend
+const http = require('http'); 
+const fetch = require('node-fetch'); 
+const { AudioContext } = require('web-audio-api'); 
+const tf = require('@tensorflow/tfjs'); 
+require('@tensorflow/tfjs-backend-cpu'); 
 
 // --- FIREBASE MODULES (Using standard v9 syntax) ---
 const { initializeApp } = require('firebase/app');
@@ -35,10 +35,10 @@ const NUM_FEATURE_BINS = 232;
 const EPSILON = 1e-7;
 
 let aiModel = null;
-const audioContext = new AudioContext(); // Initialize Pure JS AudioContext
+const audioContext = new AudioContext(); 
 
 // --- 3. SERVER SETUP & CLIENT TRACKING ---
-const server = http.createServer(); // Create HTTP server for WSS
+const server = http.createServer(); 
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ server });
 
@@ -46,9 +46,8 @@ let esp32Client = null;
 let browserClient = null;
 let audioChunks = [];
 
-// --- 4. AI HELPER FUNCTIONS ---
+// --- 4. AI HELPER FUNCTIONS (No Change) ---
 
-// Manual normalization to avoid kernel errors
 function normalizeTensor(tensor) {
     const d = EPSILON;
     return tf.tidy(() => {
@@ -60,7 +59,6 @@ function normalizeTensor(tensor) {
     });
 }
 
-// --- 5. MODEL INITIALIZATION ---
 async function initializeModel() {
     console.log("Loading AI model on server using pure JavaScript backend...");
     tf.setBackend('cpu');
@@ -73,7 +71,7 @@ async function initializeModel() {
 }
 
 
-// --- 6. CORE AI PREDICTION LOGIC ---
+// --- 5. CORE AI PREDICTION LOGIC (No Change) ---
 
 async function runPrediction(audioDataUrl, ws) {
     if (!aiModel) {
@@ -168,7 +166,7 @@ async function runPrediction(audioDataUrl, ws) {
 }
 
 
-// --- 7. AUDIO PROCESSING (RAW PCM -> WAV -> FIREBASE) ---
+// --- 6. AUDIO PROCESSING (RAW PCM -> WAV -> FIREBASE) (No Change) ---
 
 // Helper to construct a proper WAV header for the RAW PCM data
 function addWavHeader(samples, sampleRate, numChannels, bitDepth) {
@@ -227,7 +225,7 @@ function processAndUploadAudio() {
 }
 
 
-// --- 8. WEBSOCKET CONNECTION AND MESSAGE HANDLERS (FIXED WITH LOGGING) ---
+// --- 7. WEBSOCKET CONNECTION AND MESSAGE HANDLERS (CRITICAL FIX APPLIED HERE) ---
 
 wss.on('connection', (ws, req) => {
     const clientType = req.url.includes("ESP32") ? "ESP32" : "Browser";
@@ -240,35 +238,30 @@ wss.on('connection', (ws, req) => {
     }
 
     ws.on('message', (message) => {
-        let msgString = null;
-
-        // A. Handle Binary Data (Audio / Browser Command)
-        if (Buffer.isBuffer(message)) {
-            if (clientType === "ESP32") {
-                // ESP32 sends audio
-                audioChunks.push(message);
-                // *** CRITICAL DIAGNOSTIC LOG ***
-                console.log(`[ESP32] Received audio chunk. Chunk size: ${message.length} bytes. Total chunks: ${audioChunks.length}`); 
-                return;
-            } else if (clientType === "Browser" && message.length < 50) {
-                // Browser sends command as small binary buffer, convert it.
-                msgString = message.toString().trim();
-            }
-        }
-        // B. Handle Text Data
-        else {
-            msgString = message.toString().trim();
+        
+        // A. Handle Binary Data (Audio from ESP32)
+        if (clientType === "ESP32" && Buffer.isBuffer(message)) {
+            audioChunks.push(message);
+            console.log(`[ESP32] Received audio chunk. Chunk size: ${message.length} bytes. Total chunks: ${audioChunks.length}`); 
+            return;
         }
 
-        if (!msgString) return;
+        // B. Handle Text Data (Commands from ESP32 or Browser)
+        let msgString = message.toString().trim();
 
-        // --- Execute Command Logic ---
+        // 1. Check for 'END_RECORDING' first (Highest Priority)
+        if (msgString === "END_RECORDING") {
+            // ** CRITICAL: This signal must trigger processing immediately **
+            console.log("!!! CRITICAL HIT: END_RECORDING RECEIVED. Starting upload..."); 
+            processAndUploadAudio();
+            return;
+        }
+
+        // 2. Check for JSON requests from the browser
         try {
-            // Check for JSON requests from the browser
             const data = JSON.parse(msgString);
             if (data.type === 'PREDICT_REQUEST' && data.audioUrl) {
                 console.log(`[Browser] Prediction Request received.`);
-                // CRITICAL STEP: Run prediction logic on the server
                 runPrediction(data.audioUrl, ws);
                 return;
             }
@@ -276,24 +269,18 @@ wss.on('connection', (ws, req) => {
             // Not a JSON object, proceed to check for simple commands
         }
 
-        // Check for simple commands
+        // 3. Check for simple commands
         if (msgString === "START_RECORDING_REQUEST") {
-            console.log("Tell ESP32 to start recording...");
+            console.log("[Browser] Tell ESP32 to start recording...");
             audioChunks = []; // Clear old audio buffer
 
             if (esp32Client && esp32Client.readyState === WebSocket.OPEN) {
-                // ** CRITICAL: This is the command that starts the ESP32 recording **
                 esp32Client.send("START"); 
                 console.log("SUCCESS: 'START' sent to ESP32.");
             } else {
                 console.log("ERROR: Cannot send 'START'. ESP32 client is not open or connected.");
             }
-        } else if (msgString === "END_RECORDING") {
-            // ** CRITICAL: This signal ensures the AI only works AFTER the WAV file is created **
-            console.log("!!! CRITICAL HIT: END_RECORDING RECEIVED. Starting upload..."); 
-            processAndUploadAudio();
-        }
-        else if (msgString === "ESP32_CONNECTED") {
+        } else if (msgString === "ESP32_CONNECTED") {
              console.log("ESP32 identified itself."); 
         }
     });
@@ -309,7 +296,7 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-// --- 9. START SERVER AND MODEL ---
+// --- 8. START SERVER AND MODEL ---
 server.listen(port, () => {
     console.log(`Server listening on port ${port}`);
     initializeModel(); // Load the model once at startup
