@@ -18,11 +18,9 @@ const firebaseApp = initializeApp(firebaseConfig);
 const db = getDatabase(firebaseApp);
 
 // --- 2. SERVER SETUP ---
-// Render provides the PORT environment variable
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: port });
 
-// Use these global variables to track the *most recent* connection of each type
 let esp32Client = null;
 let browserClient = null;
 let audioChunks = [];
@@ -51,10 +49,11 @@ wss.on('connection', (ws, req) => {
         }
         // B. Handle Text Commands (Relay and Debug)
         else {
-            const msgString = message.toString();
+            // CRITICAL FIX: Use .trim() to eliminate any leading/trailing whitespace
+            const msgString = message.toString().trim();
 
-            // CRITICAL DEBUG LOG: This will tell us if the browser command is received
-            console.log(`[${clientType}] Command received: ${msgString}`);
+            // CRITICAL DEBUG LOG: This will now catch messages with extra whitespace
+            console.log(`[${clientType}] Command received (trimmed): ${msgString}`);
 
             if (msgString === "START_RECORDING_REQUEST") {
                 // 1. Command comes from the Browser. Relay to ESP32.
@@ -89,7 +88,6 @@ function processAndUploadAudio() {
     // Ensure we have data to process
     if (audioChunks.length === 0) {
         console.log("WARNING: Attempted upload but audioChunks array is empty.");
-        // We could send a failure message back to the browser here if we wanted
         return;
     }
 
