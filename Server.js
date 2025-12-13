@@ -1,14 +1,13 @@
-// server.js (DEBUGGING MODE - NO FIREBASE - LOGGING INTENSIVE)
+// server.js (PURE CONSOLE DEBUG MODE - NO FIREBASE - NO FS)
 
 // --- REQUIRED PURE JS MODULES ---
 const WebSocket = require('ws');
 const http = require('http');
 const { Buffer } = require('buffer');
-const fs = require('fs'); // Added for local file output during debugging
+// NO fs module required for this version
 
 // --- 1. CONFIGURATION ---
-// Server does NOT need Firebase config in this mode.
-// We keep client tracking variables from the original code.
+// No Firebase configuration needed.
 
 // --- 2. SERVER SETUP & CLIENT TRACKING ---
 const server = http.createServer();
@@ -23,52 +22,35 @@ let processingFlag = false;
 // CRITICAL FIX: Set to 159 chunks to match the observed 5-second recording length
 const EXPECTED_CHUNK_COUNT = 159;
 
-// --- 3. AUDIO PROCESSING (RAW PCM -> WAV -> LOCAL FILE) ---
+// --- 3. AUDIO PROCESSING (RAW PCM LOGGING ONLY) ---
 
 /**
  * Utility to print a sample of the buffer content for inspection.
+ * This is the core function for diagnosing silence.
  */
 function logBufferSample(buffer, name) {
-    if (buffer.length < 10) {
-        console.log(`[${name}] Data: ${buffer.toString('hex')}`);
+    if (buffer.length === 0) {
+        console.log(`[${name}] WARNING: Buffer is empty.`);
         return;
     }
-    // Print first 8 bytes and last 8 bytes
-    const startBytes = buffer.subarray(0, 8).toString('hex');
-    const endBytes = buffer.subarray(buffer.length - 8, buffer.length).toString('hex');
+    
+    // Use subarray for non-destructive inspection
+    const sampleLength = Math.min(buffer.length, 16); // Check 16 bytes (8 samples) at start and end
+    const startBytes = buffer.subarray(0, sampleLength).toString('hex');
+    const endBytes = buffer.subarray(buffer.length - sampleLength, buffer.length).toString('hex');
 
-    // This is the core check for silence!
+    // This is the CRITICAL check for silence: check if all bytes are zero
     const isSilent = buffer.every(byte => byte === 0);
 
+    // If it's 16-bit PCM, silence is represented by 0x0000.
+    // If the data is truly silent, the log will show "Silent? true"
+    
     console.log(`[${name}] Size: ${buffer.length} bytes. Silent? ${isSilent}`);
-    console.log(`[${name}] Head Sample (Hex): ${startBytes}...`);
-    console.log(`[${name}] Tail Sample (Hex): ...${endBytes}`);
+    console.log(`[${name}] Head Sample (Hex - 16 bytes): ${startBytes}...`);
+    console.log(`[${name}] Tail Sample (Hex - 16 bytes): ...${endBytes}`);
 }
 
-function addWavHeader(samples, sampleRate, numChannels, bitDepth) {
-    const byteRate = (sampleRate * numChannels * bitDepth) / 8;
-    const blockAlign = (numChannels * bitDepth) / 8;
-    const buffer = Buffer.alloc(44 + samples.length);
-
-    buffer.write('RIFF', 0);
-    buffer.writeUInt32LE(36 + samples.length, 4);
-    buffer.write('WAVE', 8);
-    buffer.write('fmt ', 12);
-    buffer.writeUInt32LE(16, 16);
-    buffer.writeUInt16LE(1, 20);
-    buffer.writeUInt16LE(numChannels, 22);
-    buffer.writeUInt32LE(sampleRate, 24);
-    buffer.writeUInt32LE(byteRate, 28);
-    buffer.writeUInt16LE(blockAlign, 32);
-    buffer.writeUInt16LE(bitDepth, 34);
-    buffer.write('data', 36);
-    buffer.writeUInt32LE(samples.length, 40);
-    samples.copy(buffer, 44);
-
-    return buffer;
-}
-
-function processAndSaveAudio() {
+function processAndLogAudio() {
     if (audioChunks.length === 0 || processingFlag) {
         console.log("WARNING: Attempted process but audioChunks array is empty or processing is already active.");
         return;
@@ -77,31 +59,20 @@ function processAndSaveAudio() {
     processingFlag = true;
 
     console.log("-------------------------------------------------------");
-    console.log(`STEP 1: Starting Final Processing. Total chunks: ${audioChunks.length}`);
+    console.log(`STEP 1: Starting Final Logging. Total chunks received: ${audioChunks.length}`);
 
     const rawBuffer = Buffer.concat(audioChunks);
 
+    // CRITICAL CHECK: Print the final raw buffer content
     logBufferSample(rawBuffer, "RAW_PCM_FINAL");
 
-    // 16000 Hz, Mono (1), 16-bit
-    const wavBuffer = addWavHeader(rawBuffer, 16000, 1, 16);
-
-    console.log(`STEP 2: WAV Buffer Size: ${wavBuffer.length} bytes.`);
+    console.log(`STEP 2: Total Raw Buffer Size: ${rawBuffer.length} bytes.`);
     
-    // Clear chunks immediately after processing starts
+    // Clear chunks
     audioChunks = [];
 
-    // --- CRITICAL DEBUG STEP: WRITE FILE LOCALLY ---
-    try {
-        const filePath = 'test_output.wav';
-        fs.writeFileSync(filePath, wavBuffer);
-        console.log(`STEP 3: Successfully wrote WAV file to ${filePath}. Download and check it!`);
-    } catch (e) {
-        console.error(`STEP 3: WARNING: Could not write file locally (fs error). This is expected on some cloud platforms like Render:`, e.message);
-    }
-    
     if (browserClient && browserClient.readyState === WebSocket.OPEN) {
-        // Signals the HTML client that processing is done.
+        // Signals the HTML client that the streaming/processing is logically complete
         browserClient.send("UPLOAD_COMPLETE"); 
     }
 
@@ -128,15 +99,20 @@ wss.on('connection', (ws, req) => {
         if (clientType === "ESP32" && Buffer.isBuffer(message)) {
             
             // --- CRITICAL LOG: CHUNK INSPECTION ---
-            logBufferSample(message, `CHUNK_${audioChunks.length}`);
+            // Log the chunk BEFORE storing it
+            if (audioChunks.length % 50 === 0 || audioChunks.length < 5) {
+                 // Log every chunk for the first 5, then every 50 chunks for brevity
+                 console.log(`\n--- Incoming CHUNK_${audioChunks.length} ---`);
+                 logBufferSample(message, `CHUNK_${audioChunks.length}`);
+            }
             // --- END CRITICAL LOG ---
 
             audioChunks.push(message);
 
             // CRITICAL FIX: Trigger processing immediately after the expected chunk count
             if (audioChunks.length >= EXPECTED_CHUNK_COUNT && !processingFlag) {
-                console.log(`!!! CRITICAL HIT (CHUNK COUNT): Reached ${EXPECTED_CHUNK_COUNT} chunks. Starting local file creation...`);
-                processAndSaveAudio();
+                console.log(`\n!!! CRITICAL HIT (CHUNK COUNT): Reached ${EXPECTED_CHUNK_COUNT} chunks. Starting final log process...`);
+                processAndLogAudio();
                 return;
             }
             return;
@@ -147,8 +123,8 @@ wss.on('connection', (ws, req) => {
 
         // 1. Check for 'END_RECORDING' (Fallback trigger)
         if (msgString === "END_RECORDING" && !processingFlag) {
-            console.log("!!! FALLBACK HIT (TEXT SIGNAL): END_RECORDING received. Starting local file creation...");
-            processAndSaveAudio();
+            console.log("!!! FALLBACK HIT (TEXT SIGNAL): END_RECORDING received. Starting final log process...");
+            processAndLogAudio();
             return;
         }
 
@@ -167,6 +143,9 @@ wss.on('connection', (ws, req) => {
             }
         } else if (msgString === "ESP32_CONNECTED") {
              console.log("ESP32 identified itself.");
+        } else if (msgString === "PREDICT_REQUEST") {
+            // Log only the request, but do nothing as we are in debug mode
+            console.log(`[Browser] Received prediction request, ignoring in debug mode: ${msgString}`);
         }
     });
 
@@ -183,5 +162,5 @@ wss.on('connection', (ws, req) => {
 
 // --- 5. START SERVER ---
 server.listen(port, () => {
-    console.log(`Server listening on port ${port} (DEBUG MODE)`);
+    console.log(`Server listening on port ${port} (PURE CONSOLE DEBUG MODE)`);
 });
