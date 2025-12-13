@@ -22,6 +22,7 @@ const db = getDatabase(firebaseApp);
 const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: port });
 
+// Use these global variables to track the *most recent* connection of each type
 let esp32Client = null;
 let browserClient = null;
 let audioChunks = [];
@@ -29,10 +30,11 @@ let audioChunks = [];
 console.log(`Server started on port ${port}`);
 
 wss.on('connection', (ws, req) => {
-    // Identify client based on the path (used by ESP32)
+    // Identify client based on the path (used by ESP32 URL)
     const clientType = req.url.includes("ESP32") ? "ESP32" : "Browser";
-    console.log(`New connection: ${clientType}`);
+    console.log(`New connection established: ${clientType}`);
 
+    // Update the global client reference to the new connection
     if (clientType === "ESP32") {
         esp32Client = ws;
     } else {
@@ -42,22 +44,31 @@ wss.on('connection', (ws, req) => {
     ws.on('message', (message) => {
         // A. Handle Binary Audio Data from ESP32
         if (Buffer.isBuffer(message)) {
-            // Received audio chunk: 2 bytes per sample (16-bit PCM)
-            audioChunks.push(message);
+            // Only ESP32 should send binary data
+            if (clientType === "ESP32") {
+                audioChunks.push(message);
+            }
         }
-        // B. Handle Text Commands
+        // B. Handle Text Commands (Relay and Debug)
         else {
             const msgString = message.toString();
 
+            // CRITICAL DEBUG LOG: This will tell us if the browser command is received
+            console.log(`[${clientType}] Command received: ${msgString}`);
+
             if (msgString === "START_RECORDING_REQUEST") {
-                // Command came from browser. Relay to ESP32.
+                // 1. Command comes from the Browser. Relay to ESP32.
                 console.log("Tell ESP32 to start recording...");
                 audioChunks = []; // Clear old audio buffer
+
                 if (esp32Client && esp32Client.readyState === WebSocket.OPEN) {
                     esp32Client.send("START");
+                    console.log("SUCCESS: 'START' sent to ESP32.");
+                } else {
+                    console.log("ERROR: Cannot send 'START'. ESP32 client is not open or connected.");
                 }
             } else if (msgString === "END_RECORDING") {
-                // Command came from ESP32. Process audio and upload.
+                // 2. Command comes from the ESP32. Process audio and upload.
                 console.log("ESP32 finished. Processing WAV and uploading...");
                 processAndUploadAudio();
             }
@@ -67,16 +78,29 @@ wss.on('connection', (ws, req) => {
     ws.on('close', () => {
         console.log(`${clientType} disconnected`);
     });
+
+    ws.on('error', (err) => {
+        console.error(`WebSocket Error for ${clientType}:`, err.message);
+    });
 });
 
 // --- 3. AUDIO PROCESSING (RAW PCM -> WAV -> FIREBASE) ---
 function processAndUploadAudio() {
+    // Ensure we have data to process
+    if (audioChunks.length === 0) {
+        console.log("WARNING: Attempted upload but audioChunks array is empty.");
+        // We could send a failure message back to the browser here if we wanted
+        return;
+    }
+
     const rawBuffer = Buffer.concat(audioChunks);
     // Audio settings must match ESP32 I2S setup (16kHz, Mono, 16-bit)
     const wavBuffer = addWavHeader(rawBuffer, 16000, 1, 16);
 
     // Convert WAV data to Base64 Data URI for simple storage/retrieval from Realtime DB
     const base64Audio = wavBuffer.toString('base64');
+
+    console.log(`Uploading to Firebase... Raw buffer size: ${rawBuffer.length} bytes.`);
 
     set(ref(db, 'latest_recording'), {
             timestamp: Date.now(),
@@ -85,7 +109,10 @@ function processAndUploadAudio() {
         })
         .then(() => {
             console.log("Firebase Upload successful!");
-            if (browserClient) browserClient.send("UPLOAD_COMPLETE");
+            // Notify the browser client (if connected)
+            if (browserClient && browserClient.readyState === WebSocket.OPEN) {
+                browserClient.send("UPLOAD_COMPLETE");
+            }
         })
         .catch((error) => {
             console.error("Firebase upload error:", error);
