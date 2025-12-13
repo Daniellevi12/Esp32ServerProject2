@@ -1,4 +1,4 @@
-// server.js (FINAL VERSION - CRITICAL FIX FOR END_RECORDING MESSAGE)
+// server.js (FINAL VERSION - CRITICAL FIX: Chunk Count Trigger)
 
 // --- REQUIRED PURE JS MODULES ---
 const WebSocket = require('ws');
@@ -12,7 +12,7 @@ require('@tensorflow/tfjs-backend-cpu');
 const { initializeApp } = require('firebase/app');
 const { getDatabase, ref, set } = require('firebase/database');
 
-// --- 1. FIREBASE CONFIGURATION ---
+// --- 1. FIREBASE CONFIGURATION (Use your actual config) ---
 const firebaseConfig = {
     apiKey: "AIzaSyDfmDZO12RvN9h5Suk2v2Air6LIr4dGIE4",
     authDomain: "carsense-abb24.firebaseapp.com",
@@ -45,6 +45,7 @@ const wss = new WebSocket.Server({ server });
 let esp32Client = null;
 let browserClient = null;
 let audioChunks = [];
+let processingFlag = false; // Prevents double-processing
 
 // --- 4. AI HELPER FUNCTIONS (No Change) ---
 
@@ -70,7 +71,6 @@ async function initializeModel() {
     }
 }
 
-
 // --- 5. CORE AI PREDICTION LOGIC (No Change) ---
 
 async function runPrediction(audioDataUrl, ws) {
@@ -82,11 +82,9 @@ async function runPrediction(audioDataUrl, ws) {
     try {
         console.log("Starting server-side prediction (Pure JS backend)...");
 
-        // A. Fetch Audio Data Buffer
         const response = await fetch(audioDataUrl);
         const arrayBuffer = await response.arrayBuffer();
 
-        // B. Decode WAV Buffer (Pure JS AudioContext)
         const audioBuffer = await new Promise((resolve, reject) => {
             audioContext.decodeAudioData(arrayBuffer, resolve, reject);
         });
@@ -162,17 +160,19 @@ async function runPrediction(audioDataUrl, ws) {
     } catch (error) {
         console.error("Server Prediction Error:", error);
         ws.send(JSON.stringify({ predictedClass: "Prediction Failed (Server Error)", confidence: 0, windowsPredicted: [] }));
+    } finally {
+        processingFlag = false; // Reset flag after processing completes
     }
 }
 
-
-// --- 6. AUDIO PROCESSING (RAW PCM -> WAV -> FIREBASE) (No Change) ---
+// --- 6. AUDIO PROCESSING (RAW PCM -> WAV -> FIREBASE) ---
 
 // Helper to construct a proper WAV header for the RAW PCM data
 function addWavHeader(samples, sampleRate, numChannels, bitDepth) {
     const byteRate = (sampleRate * numChannels * bitDepth) / 8;
     const blockAlign = (numChannels * bitDepth) / 8;
-    const buffer = Buffer.alloc(44 + samples.length);
+    // We allocate the buffer size for the 44-byte header + the raw sample data size
+    const buffer = Buffer.alloc(44 + samples.length); 
 
     buffer.write('RIFF', 0);
     buffer.writeUInt32LE(36 + samples.length, 4);
@@ -193,10 +193,12 @@ function addWavHeader(samples, sampleRate, numChannels, bitDepth) {
 }
 
 function processAndUploadAudio() {
-    if (audioChunks.length === 0) {
-        console.log("WARNING: Attempted upload but audioChunks array is empty.");
+    if (audioChunks.length === 0 || processingFlag) {
+        console.log("WARNING: Attempted upload but audioChunks array is empty or processing is already active.");
         return;
     }
+    
+    processingFlag = true; // Set flag to prevent re-entry
 
     const rawBuffer = Buffer.concat(audioChunks);
     const wavBuffer = addWavHeader(rawBuffer, 16000, 1, 16);
@@ -213,7 +215,7 @@ function processAndUploadAudio() {
             status: "ready"
         })
         .then(() => {
-            console.log("Firebase Upload successful!");
+            console.log("Firebase Upload successful! Signalling browser...");
             if (browserClient && browserClient.readyState === WebSocket.OPEN) {
                 // Signals the HTML to fetch the data and start the prediction sequence.
                 browserClient.send("UPLOAD_COMPLETE");
@@ -221,6 +223,9 @@ function processAndUploadAudio() {
         })
         .catch((error) => {
             console.error("Firebase upload error:", error);
+        })
+        .finally(() => {
+            processingFlag = false; // Reset flag after operation completes
         });
 }
 
@@ -243,16 +248,23 @@ wss.on('connection', (ws, req) => {
         if (clientType === "ESP32" && Buffer.isBuffer(message)) {
             audioChunks.push(message);
             console.log(`[ESP32] Received audio chunk. Chunk size: ${message.length} bytes. Total chunks: ${audioChunks.length}`); 
+            
+            // 🚨 CRITICAL FIX: Trigger processing immediately after the last expected chunk.
+            // A 10-second recording @ 16kHz, 16-bit mono results in ~316 chunks of 1024 bytes.
+            if (audioChunks.length >= 316 && !processingFlag) { 
+                console.log("!!! CRITICAL HIT (CHUNK COUNT): Last expected chunk received. Starting upload...");
+                processAndUploadAudio();
+                return; // Stop further processing this tick
+            }
             return;
         }
 
         // B. Handle Text Data (Commands from ESP32 or Browser)
         let msgString = message.toString().trim();
 
-        // 1. Check for 'END_RECORDING' first (Highest Priority)
-        if (msgString === "END_RECORDING") {
-            // ** CRITICAL: This signal must trigger processing immediately **
-            console.log("!!! CRITICAL HIT: END_RECORDING RECEIVED. Starting upload..."); 
+        // 1. Check for 'END_RECORDING' (Kept as a fallback/redundancy)
+        if (msgString === "END_RECORDING" && !processingFlag) {
+            console.log("!!! CRITICAL HIT (TEXT FALLBACK): END_RECORDING received. Starting upload..."); 
             processAndUploadAudio();
             return;
         }
@@ -273,6 +285,7 @@ wss.on('connection', (ws, req) => {
         if (msgString === "START_RECORDING_REQUEST") {
             console.log("[Browser] Tell ESP32 to start recording...");
             audioChunks = []; // Clear old audio buffer
+            processingFlag = false; // Reset flag for new recording
 
             if (esp32Client && esp32Client.readyState === WebSocket.OPEN) {
                 esp32Client.send("START"); 
@@ -289,10 +302,12 @@ wss.on('connection', (ws, req) => {
         console.log(`${clientType} disconnected`);
         if (clientType === "ESP32") esp32Client = null;
         if (clientType === "Browser") browserClient = null;
+        processingFlag = false; // Reset flag on disconnection
     });
 
     ws.on('error', (err) => {
         console.error(`WebSocket Error for ${clientType}:`, err.message);
+        processingFlag = false; // Reset flag on error
     });
 });
 
