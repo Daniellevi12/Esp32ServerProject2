@@ -1,9 +1,28 @@
-// server.js (WITH INITIAL MESSAGE FILTER - PURE CONSOLE DEBUG MODE)
+// server.js (PRODUCTION MODE - Firebase & WAV Restored)
 
 // --- REQUIRED PURE JS MODULES ---
 const WebSocket = require('ws');
 const http = require('http');
 const { Buffer } = require('buffer');
+
+// --- FIREBASE MODULES (Using standard v9 syntax) ---
+const { initializeApp } = require('firebase/app');
+const { getDatabase, ref, set } = require('firebase/database');
+
+// --- 1. FIREBASE CONFIGURATION (Using your actual config) ---
+const firebaseConfig = {
+    apiKey: "AIzaSyDfmDZO12RvN9h5Suk2v2Air6LIr4dGIE4",
+    authDomain: "carsense-abb24.firebaseapp.com",
+    databaseURL: "https://carsense-abb24-default-rtdb.europe-west1.firebasedatabase.app",
+    projectId: "carsense-abb24",
+    storageBucket: "carsense-abb24.firebasestorage.app",
+    messagingSenderId: "225453696410",
+    appId: "1:225453696410:web:54ff1fba95d4b02f9f8623",
+    measurementId: "G-W5DP1WBC4S"
+};
+
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getDatabase(firebaseApp);
 
 // --- 2. SERVER SETUP & CLIENT TRACKING ---
 const server = http.createServer();
@@ -15,60 +34,87 @@ let browserClient = null;
 let audioChunks = [];
 let processingFlag = false;
 
-// CRITICAL FIX: Set to 159 chunks to match the observed 5-second recording length
+// CRITICAL VALUES (5 seconds recording)
 const EXPECTED_CHUNK_COUNT = 159;
+const MONO_CHUNK_SIZE_BYTES = 1024; // C++ code sends 1024 bytes per chunk
+const EXPECTED_RAW_SIZE = EXPECTED_CHUNK_COUNT * MONO_CHUNK_SIZE_BYTES;
 
-// --- 3. AUDIO PROCESSING (RAW PCM LOGGING ONLY) ---
 
-function logBufferSample(buffer, name) {
-    if (buffer.length === 0) {
-        console.log(`[${name}] WARNING: Buffer is empty.`);
-        return;
-    }
-    
-    const sampleLength = Math.min(buffer.length, 16);
-    const startBytes = buffer.subarray(0, sampleLength).toString('hex');
-    const endBytes = buffer.subarray(buffer.length - sampleLength, buffer.length).toString('hex');
+// --- 3. AUDIO PROCESSING (RAW PCM -> WAV -> FIREBASE) ---
 
-    const isSilent = buffer.every(byte => byte === 0);
+function addWavHeader(samples, sampleRate, numChannels, bitDepth) {
+    const byteRate = (sampleRate * numChannels * bitDepth) / 8;
+    const blockAlign = (numChannels * bitDepth) / 8;
+    const buffer = Buffer.alloc(44 + samples.length);
 
-    console.log(`[${name}] Size: ${buffer.length} bytes. Silent? ${isSilent}`);
-    console.log(`[${name}] Head Sample (Hex - 16 bytes): ${startBytes}...`);
-    console.log(`[${name}] Tail Sample (Hex - 16 bytes): ...${endBytes}`);
+    buffer.write('RIFF', 0);
+    buffer.writeUInt32LE(36 + samples.length, 4);
+    buffer.write('WAVE', 8);
+    buffer.write('fmt ', 12);
+    buffer.writeUInt32LE(16, 16);
+    buffer.writeUInt16LE(1, 20);
+    buffer.writeUInt16LE(numChannels, 22);
+    buffer.writeUInt32LE(sampleRate, 24);
+    buffer.writeUInt32LE(byteRate, 28);
+    buffer.writeUInt16LE(blockAlign, 32);
+    buffer.writeUInt16LE(bitDepth, 34);
+    buffer.write('data', 36);
+    buffer.writeUInt32LE(samples.length, 40);
+    samples.copy(buffer, 44);
+
+    return buffer;
 }
 
-function processAndLogAudio() {
+function processAndUploadAudio() {
     if (audioChunks.length === 0 || processingFlag) {
-        console.log("WARNING: Attempted process but audioChunks array is empty or processing is already active.");
+        console.log("WARNING: Attempted upload but audioChunks array is empty or processing is already active.");
         return;
     }
 
     processingFlag = true;
-
-    console.log("-------------------------------------------------------");
-    console.log(`STEP 1: Starting Final Logging. Total chunks received: ${audioChunks.length}`);
-
-    const rawBuffer = Buffer.concat(audioChunks);
-
-    logBufferSample(rawBuffer, "RAW_PCM_FINAL");
-
-    console.log(`STEP 2: Total Raw Buffer Size: ${rawBuffer.length} bytes.`);
     
-    // Clear chunks
+    // --- CONCATENATE ALL CHUNKS ---
+    let rawBuffer = Buffer.concat(audioChunks);
+    
+    // --- CRITICAL SAFEGUARD: TRIM IF OVERSIZED DUE TO TEXT COMMAND ---
+    if (rawBuffer.length > EXPECTED_RAW_SIZE) {
+        console.log(`WARNING: Trimming raw buffer from ${rawBuffer.length} to expected ${EXPECTED_RAW_SIZE} bytes (removing trailing text).`);
+        rawBuffer = rawBuffer.subarray(0, EXPECTED_RAW_SIZE);
+    }
+    // -----------------------------------------------------------------
+
+    // 16000 Hz, Mono (1), 16-bit
+    const wavBuffer = addWavHeader(rawBuffer, 16000, 1, 16);
+    const base64Audio = wavBuffer.toString('base64');
+
+    console.log(`Uploading to Firebase... Raw buffer size: ${rawBuffer.length} bytes. Total chunks processed: ${audioChunks.length}`);
+
+    // Clear chunks immediately after processing starts
     audioChunks = [];
 
-    if (browserClient && browserClient.readyState === WebSocket.OPEN) {
-        browserClient.send("UPLOAD_COMPLETE"); 
-    }
-
-    console.log("-------------------------------------------------------");
-    processingFlag = false;
+    set(ref(db, 'latest_recording'), {
+            timestamp: Date.now(),
+            audioData: "data:audio/wav;base64," + base64Audio,
+            status: "ready"
+        })
+        .then(() => {
+            console.log("Firebase Upload successful! Check the WAV file in your database.");
+            if (browserClient && browserClient.readyState === WebSocket.OPEN) {
+                // Signals the HTML client that the file is ready
+                browserClient.send("UPLOAD_COMPLETE");
+            }
+        })
+        .catch((error) => {
+            console.error("Firebase upload error:", error);
+        })
+        .finally(() => {
+            processingFlag = false;
+        });
 }
 
 
 // --- 4. WEBSOCKET CONNECTION AND MESSAGE HANDLERS ---
 
-// --- NEW CRITICAL TRACKER ---
 let esp32InitialMessageReceived = false;
 
 wss.on('connection', (ws, req) => {
@@ -77,8 +123,7 @@ wss.on('connection', (ws, req) => {
 
     if (clientType === "ESP32") {
         esp32Client = ws;
-        // Reset the flag for a new ESP32 connection
-        esp32InitialMessageReceived = false; 
+        esp32InitialMessageReceived = false; // Reset the flag for a new ESP32 connection
     } else {
         browserClient = ws;
     }
@@ -87,28 +132,26 @@ wss.on('connection', (ws, req) => {
 
         // A. Handle Binary Data (Audio from ESP32)
         if (clientType === "ESP32" && Buffer.isBuffer(message)) {
-            
-            // CRITICAL FILTER: Check if the message is the "ESP32_CONNECTED" string 
-            // even though it arrived as a Buffer.
+
+            // CRITICAL FILTER: Ignore the initial "ESP32_CONNECTED" message
             const messageAsString = message.toString('utf8').trim();
             if (messageAsString === "ESP32_CONNECTED" && !esp32InitialMessageReceived) {
                  console.log(`[ESP32 Filter] Ignored initial identification message: "${messageAsString}"`);
                  esp32InitialMessageReceived = true;
                  return; // DO NOT treat this as an audio chunk
             }
-
-            // --- CRITICAL LOG: CHUNK INSPECTION ---
-            if (audioChunks.length % 50 === 0 || audioChunks.length < 5) {
-                 console.log(`\n--- Incoming CHUNK_${audioChunks.length} ---`);
-                 logBufferSample(message, `CHUNK_${audioChunks.length}`);
-            }
-            // --- END CRITICAL LOG ---
-
+            
             audioChunks.push(message);
 
+            if (audioChunks.length % 50 === 0 || audioChunks.length < 5) {
+                console.log(`Received chunk ${audioChunks.length}. Size: ${message.length} bytes.`);
+            }
+
+
+            // CRITICAL FIX: Trigger processing immediately after the expected chunk count
             if (audioChunks.length >= EXPECTED_CHUNK_COUNT && !processingFlag) {
-                console.log(`\n!!! CRITICAL HIT (CHUNK COUNT): Reached ${EXPECTED_CHUNK_COUNT} chunks. Starting final log process...`);
-                processAndLogAudio();
+                console.log(`\n!!! CRITICAL HIT (CHUNK COUNT): Reached ${EXPECTED_CHUNK_COUNT} chunks. Starting upload to Firebase...`);
+                processAndUploadAudio();
                 return;
             }
             return;
@@ -119,17 +162,17 @@ wss.on('connection', (ws, req) => {
 
         // 1. Check for 'END_RECORDING' (Fallback trigger)
         if (msgString === "END_RECORDING" && !processingFlag) {
-            console.log("!!! FALLBACK HIT (TEXT SIGNAL): END_RECORDING received. Starting final log process...");
-            processAndLogAudio();
+            console.log("!!! FALLBACK HIT (TEXT SIGNAL): END_RECORDING received. Starting upload to Firebase...");
+            processAndUploadAudio();
             return;
         }
 
-        // 2. Check for simple commands from the browser or ESP32
+        // 2. Check for simple commands from the browser
         if (msgString === "START_RECORDING_REQUEST") {
             console.log("[Browser] Tell ESP32 to start recording...");
             audioChunks = [];
             processingFlag = false;
-            
+
             if (esp32Client && esp32Client.readyState === WebSocket.OPEN) {
                 esp32Client.send("START");
                 console.log("SUCCESS: 'START' sent to ESP32. Waiting for chunks...");
@@ -137,12 +180,8 @@ wss.on('connection', (ws, req) => {
                 console.log("ERROR: Cannot send 'START'. ESP32 client is not open or connected.");
                 if (browserClient) browserClient.send("ERROR: ESP32 not connected.");
             }
-        } else if (msgString === "ESP32_CONNECTED") {
-             // This branch handles the text message, but the filter above handles the binary message
-             console.log("ESP32 identified itself (as text).");
-        } else if (msgString === "PREDICT_REQUEST") {
-            console.log(`[Browser] Received prediction request, ignoring in debug mode.`);
         }
+        // No need to check for "ESP32_CONNECTED" here as it's filtered above if sent as binary
     });
 
     ws.on('close', () => {
@@ -158,5 +197,5 @@ wss.on('connection', (ws, req) => {
 
 // --- 5. START SERVER ---
 server.listen(port, () => {
-    console.log(`Server listening on port ${port} (INITIAL MESSAGE FILTER ADDED)`);
+    console.log(`Server listening on port ${port} (PRODUCTION MODE)`);
 });
