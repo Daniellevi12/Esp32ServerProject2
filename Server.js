@@ -1,14 +1,25 @@
 const WebSocket = require('ws');
 const admin = require('firebase-admin');
 
-// --- 1. FIREBASE SETUP (Using 'key' Env Var) ---
+// --- 1. FIREBASE SETUP (The Bulletproof Version) ---
 try {
-    // This looks for the Environment Variable named "key" in Render
+    // 1. Parse the 'key' environment variable
+    if (!process.env.key) {
+        throw new Error("Environment variable 'key' is missing!");
+    }
+    
     const serviceAccount = JSON.parse(process.env.key);
 
-    // This fixes the Private Key formatting for Cloud servers
+    // 2. THE ULTIMATE KEY REPAIR
+    // This removes extra quotes, handles double-escaped backslashes, 
+    // and ensures the header/footer are clean.
     if (serviceAccount.private_key) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+        serviceAccount.private_key = serviceAccount.private_key
+            .replace(/\\n/g, '\n')     // Convert literal \n to real newline
+            .replace(/"/g, '')         // Remove any accidental wrapping quotes
+            .replace(/-----BEGIN PRIVATE KEY-----/, '-----BEGIN PRIVATE KEY-----\n')
+            .replace(/-----END PRIVATE KEY-----/, '\n-----END PRIVATE KEY-----\n')
+            .replace(/\n+/g, '\n');    // Remove accidental double newlines
     }
 
     admin.initializeApp({
@@ -16,10 +27,10 @@ try {
         storageBucket: "carsense-abb24.firebasestorage.app"
     });
 
-    console.log("✅ Firebase initialized successfully from env 'key'");
+    console.log("✅ Firebase initialized. Signature repair applied.");
 } catch (error) {
     console.error("❌ Firebase Init Failed:", error.message);
-    process.exit(1); // Stop the server if Firebase isn't working
+    process.exit(1); 
 }
 
 const bucket = admin.storage().bucket();
@@ -99,6 +110,8 @@ async function saveFile() {
         const fileName = `scans/audio_${Date.now()}.wav`;
         const file = bucket.file(fileName);
 
+        // resumable: false is CRITICAL on Render to prevent JWT timeout errors
+        console.log(`📤 Uploading ${wavBuffer.length} bytes to Firebase...`);
         await file.save(wavBuffer, {
             metadata: { contentType: 'audio/wav' },
             resumable: false 
@@ -109,7 +122,7 @@ async function saveFile() {
             expires: '01-01-2030'
         });
 
-        console.log("✅ File ready! Sending URL to browser.");
+        console.log("✅ File ready! URL sent to browser.");
 
         if (browser && browser.readyState === WebSocket.OPEN) {
             browser.send(JSON.stringify({ audioUrl: url }));
@@ -118,5 +131,9 @@ async function saveFile() {
 
     } catch (error) {
         console.error("🔥 Firebase Save Error:", error.message);
+        // Hint for the user in the logs
+        if (error.message.includes("invalid_grant")) {
+            console.log("💡 The JWT signature is still failing. Re-check the 'key' content in Render settings.");
+        }
     }
 }
