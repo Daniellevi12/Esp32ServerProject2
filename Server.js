@@ -1,14 +1,12 @@
 const WebSocket = require('ws');
 const admin = require('firebase-admin');
 
-// --- 1. FIREBASE SETUP (Using Environment Variable 'key') ---
-let serviceAccount;
-
+// --- 1. FIREBASE SETUP (Using 'key' Env Var) ---
 try {
-    // Access the 'key' environment variable and parse the JSON string
-    serviceAccount = JSON.parse(process.env.key);
+    // This looks for the Environment Variable named "key" in Render
+    const serviceAccount = JSON.parse(process.env.key);
 
-    // FIX: Convert the literal \n text in the private key to real line breaks
+    // This fixes the Private Key formatting for Cloud servers
     if (serviceAccount.private_key) {
         serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
@@ -17,10 +15,11 @@ try {
         credential: admin.credential.cert(serviceAccount),
         storageBucket: "carsense-abb24.firebasestorage.app"
     });
-    console.log("✅ Firebase initialized from environment variable 'key'");
+
+    console.log("✅ Firebase initialized successfully from env 'key'");
 } catch (error) {
-    console.error("❌ Failed to parse Firebase key from environment variable:", error.message);
-    process.exit(1);
+    console.error("❌ Firebase Init Failed:", error.message);
+    process.exit(1); // Stop the server if Firebase isn't working
 }
 
 const bucket = admin.storage().bucket();
@@ -31,7 +30,6 @@ let audioChunks = [];
 let browser = null;
 let esp32 = null;
 
-console.log(`✅ Firebase Ready using: ${serviceAccountPath}`);
 console.log(`🚀 CarSense Server active on port ${PORT}`);
 
 // --- 2. WAV HEADER HELPER ---
@@ -68,10 +66,10 @@ wss.on('connection', (ws, req) => {
             const msgStr = data.toString().trim();
             if (msgStr === "START") {
                 audioChunks = [];
-                console.log("⏺️ Start Command Received");
+                console.log("⏺️ Recording started...");
                 if (esp32 && esp32.readyState === 1) esp32.send("START");
             } else if (msgStr === "STOP") {
-                console.log("⏹️ Stop Command Received");
+                console.log("⏹️ Recording stopped. Saving...");
                 if (esp32 && esp32.readyState === 1) esp32.send("STOP");
                 saveFile();
             }
@@ -91,18 +89,16 @@ wss.on('connection', (ws, req) => {
 async function saveFile() {
     try {
         if (audioChunks.length === 0) {
-            console.log("⚠️ No audio data to save.");
+            console.log("⚠️ No data to save.");
             return;
         }
 
-        console.log(`📦 Concatenating ${audioChunks.length} chunks...`);
         const rawBuffer = Buffer.concat(audioChunks);
         const wavBuffer = addWavHeader(rawBuffer, 16000); 
 
         const fileName = `scans/audio_${Date.now()}.wav`;
         const file = bucket.file(fileName);
 
-        console.log("📤 Uploading to Firebase...");
         await file.save(wavBuffer, {
             metadata: { contentType: 'audio/wav' },
             resumable: false 
@@ -113,7 +109,7 @@ async function saveFile() {
             expires: '01-01-2030'
         });
 
-        console.log("✅ File Uploaded! URL sent to Browser.");
+        console.log("✅ File ready! Sending URL to browser.");
 
         if (browser && browser.readyState === WebSocket.OPEN) {
             browser.send(JSON.stringify({ audioUrl: url }));
