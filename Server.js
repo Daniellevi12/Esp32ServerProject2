@@ -1,9 +1,7 @@
 const WebSocket = require('ws');
 const admin = require('firebase-admin');
 
-// --- 1. FIREBASE SETUP (Direct Object Version) ---
-
-// PASTE YOUR ENTIRE JSON CONTENT BETWEEN THE CURLY BRACES BELOW
+// --- 1. FIREBASE SETUP ---
 const serviceAccount = {
   "type": "service_account",
   "project_id": "carsense-abb24",
@@ -18,7 +16,8 @@ const serviceAccount = {
   "universe_domain": "googleapis.com"
 };
 
-// THE REPAIR: This fixes the signature issue for Cloud servers
+// THE REPAIR LOGIC:
+// This looks for the literal string "\n" and replaces it with an actual newline character.
 if (serviceAccount.private_key) {
     serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
 }
