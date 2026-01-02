@@ -2,8 +2,8 @@ const WebSocket = require('ws');
 const admin = require('firebase-admin');
 const tf = require('@tensorflow/tfjs-node');
 
-// --- 1. FIREBASE ADMIN SETUP (NO JSON FILE NEEDED) ---
-// This looks for the text you pasted into Render's Dashboard
+// --- 1. FIREBASE ADMIN SETUP ---
+// PASTE YOUR JSON VALUES HERE
 const serviceAccount = {
   "type": "service_account",
   "project_id": "carsense-abb24",
@@ -16,7 +16,7 @@ const serviceAccount = {
   "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
   "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40carsense-abb24.iam.gserviceaccount.com",
   "universe_domain": "googleapis.com"
-}
+};
 
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -29,73 +29,98 @@ const bucket = admin.storage().bucket();
 
 // --- 2. AI CONFIGURATION ---
 const MODEL_URL = 'https://teachablemachine.withgoogle.com/models/7KA0738CC/model.json';
-const LABELS = ['Background Noise', 'Car Horn']; // Ensure these match your TM classes exactly
+const LABELS = ['Background Noise', 'Car Horn']; 
 let model;
 
 async function loadModel() {
     try {
         model = await tf.loadLayersModel(MODEL_URL);
-        console.log("✅ AI Model Loaded");
+        console.log("✅ AI Model Loaded Successfully");
     } catch (err) {
-        console.error("❌ Model Load Failed:", err);
+        console.error("❌ AI Model failed to load:", err);
     }
 }
 loadModel();
 
-// --- 3. SERVER LOGIC ---
-const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
+// --- 3. SERVER LOGIC & PORT BINDING ---
+const port = process.env.PORT || 10000;
+const wss = new WebSocket.Server({ port: port }, () => {
+    console.log(`🚀 Server active on port ${port}`);
+});
+
 let esp32 = null;
 let browser = null;
 let audioBuffer = [];
 
-console.log("🚀 Render Server Started...");
+wss.on('connection', (ws, req) => {
+    // Determine connection type via URL query ?type=ESP32
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const isESP = url.searchParams.get('type') === 'ESP32';
+    const type = isESP ? "ESP32" : "Browser";
+    
+    if (isESP) {
+        esp32 = ws;
+        console.log("ESP32: Online");
+    } else {
+        browser = ws;
+        console.log("Browser: Online");
+    }
 
-ws.on('message', async (data) => {
-        // 1. CHECK IF DATA IS A BINARY BUFFER (AUDIO)
+    ws.on('message', async (data) => {
+        // A. Handle Binary Audio (ESP32 data)
         if (Buffer.isBuffer(data)) {
-            if (type === "ESP32") {
+            if (isESP) {
                 audioBuffer.push(data);
                 let currentSize = Buffer.concat(audioBuffer).length;
 
-                // Every time we get a chunk, let's log the progress
-                if (audioBuffer.length % 100 === 0) {
-                    console.log(`Audio Progress: ${currentSize} bytes received...`);
+                if (audioBuffer.length % 50 === 0) {
+                    console.log(`Receiving Audio: ${currentSize} bytes...`);
                 }
 
+                // If we have ~9.5s of data, process it
                 if (currentSize >= 304000) { 
-                    console.log(`✅ Success: 10s Audio Received (${currentSize} bytes). Analyzing...`);
-                    processAndUpload(Buffer.concat(audioBuffer));
+                    console.log(`✅ Buffer Full (${currentSize} bytes). Starting AI...`);
+                    const finalBuffer = Buffer.concat(audioBuffer);
+                    processAndUpload(finalBuffer);
                     audioBuffer = []; 
                 }
             }
-            return; // Exit here so we don't treat binary as a command
+            return; 
         }
 
-        // 2. CHECK IF DATA IS A TEXT COMMAND
+        // B. Handle Text Commands (Browser commands)
         const msg = data.toString().trim();
-        console.log(`Command Received: [${msg}] from ${type}`);
+        console.log(`Incoming Command: [${msg}] from ${type}`);
 
         if (msg === "START_RECORDING") {
             audioBuffer = []; 
             if (esp32 && esp32.readyState === WebSocket.OPEN) {
-                console.log("Action: Triggering ESP32...");
+                console.log("Action: Pinging ESP32 to start...");
                 esp32.send("START");
             } else {
-                console.log("Error: ESP32 not connected");
+                console.log("Error: ESP32 is offline, cannot start.");
                 ws.send(JSON.stringify({error: "ESP32 Offline"}));
             }
         }
     });
 
+    ws.on('close', () => {
+        console.log(`${type} disconnected.`);
+        if (type === "ESP32") esp32 = null;
+        if (type === "Browser") browser = null;
+    });
+});
+
+// --- 4. DATA PROCESSING & FIREBASE ---
 async function processAndUpload(rawBuffer) {
     try {
-        // 1. Convert Buffer to Float32 for AI
+        // Convert to Float32 for AI
         const float32 = new Float32Array(rawBuffer.length / 2);
         for (let i = 0; i < float32.length; i++) {
             float32[i] = rawBuffer.readInt16LE(i * 2) / 32768.0;
         }
 
-        // 2. Run Inference (1 second snapshot)
+        // Run Inference
         const input = tf.tensor(float32.subarray(0, 16000), [1, 16000]);
         const prediction = await model.predict(input).data();
         const maxIdx = prediction.indexOf(Math.max(...prediction));
@@ -105,30 +130,30 @@ async function processAndUpload(rawBuffer) {
             confidence: (prediction[maxIdx] * 100).toFixed(1) 
         };
 
-        // 3. Create a WAV file and upload to Firebase Storage
+        // Upload to Storage
         const fileName = `scans/scan_${Date.now()}.wav`;
         const file = bucket.file(fileName);
         
-        // Simple WAV Header Wrapper (Basic)
         await file.save(rawBuffer, { 
-            metadata: { contentType: 'audio/wav' },
-            public: true 
+            metadata: { contentType: 'audio/wav' }
         });
 
-        // Get the link
-        const [url] = await file.getSignedUrl({ 
-            action: 'read', 
-            expires: '01-01-2030' 
-        });
+        // Make it public and get URL
+        await file.makePublic();
+        const publicUrl = `https://storage.googleapis.com/${bucket.name}/${fileName}`;
 
-        // 4. Save to RTDB & Send back to Website
-        const scanData = { ...result, audioUrl: url, timestamp: Date.now() };
+        const scanData = { ...result, audioUrl: publicUrl, timestamp: Date.now() };
+        
+        // Save to Database
         await db.ref('latest_scan').set(scanData);
         
-        if (browser) browser.send(JSON.stringify(scanData));
-        console.log("✅ Analysis Complete:", result.label);
+        // Send to Website
+        if (browser && browser.readyState === WebSocket.OPEN) {
+            browser.send(JSON.stringify(scanData));
+        }
+        console.log("✅ Analysis complete. Result sent to dashboard.");
 
     } catch (error) {
-        console.error("Processing Error:", error);
+        console.error("❌ Critical Processing Error:", error);
     }
 }
