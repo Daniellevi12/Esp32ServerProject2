@@ -1,34 +1,27 @@
 const WebSocket = require('ws');
 const admin = require('firebase-admin');
-const fs = require('fs');
-const path = require('path');
 
-// --- 1. FIREBASE SETUP (Render Secret File Fix) ---
-const possiblePaths = [
-    '/etc/secrets/serviceAccountKey.json', // Render standard secret path
-    './serviceAccountKey.json',             // Local root
-    '../serviceAccountKey.json'             // Parent directory
-];
+// --- 1. FIREBASE SETUP (Using Environment Variable 'key') ---
+let serviceAccount;
 
-let serviceAccountPath = "";
+try {
+    // Access the 'key' environment variable and parse the JSON string
+    serviceAccount = JSON.parse(process.env.key);
 
-for (const p of possiblePaths) {
-    if (fs.existsSync(p)) {
-        serviceAccountPath = p;
-        break;
+    // FIX: Convert the literal \n text in the private key to real line breaks
+    if (serviceAccount.private_key) {
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
     }
-}
 
-if (!serviceAccountPath) {
-    console.error("❌ ERROR: serviceAccountKey.json NOT FOUND!");
+    admin.initializeApp({
+        credential: admin.credential.cert(serviceAccount),
+        storageBucket: "carsense-abb24.firebasestorage.app"
+    });
+    console.log("✅ Firebase initialized from environment variable 'key'");
+} catch (error) {
+    console.error("❌ Failed to parse Firebase key from environment variable:", error.message);
     process.exit(1);
 }
-
-// Initialize Admin only ONCE
-admin.initializeApp({
-    credential: admin.credential.cert(serviceAccountPath),
-    storageBucket: "carsense-abb24.firebasestorage.app"
-});
 
 const bucket = admin.storage().bucket();
 const PORT = process.env.PORT || 10000;
