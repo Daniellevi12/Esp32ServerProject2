@@ -99,10 +99,7 @@ wss.on('connection', (ws, req) => {
 // --- 4. FIREBASE UPLOAD ---
 async function saveFile() {
     try {
-        if (audioChunks.length === 0) {
-            console.log("⚠️ No data to save.");
-            return;
-        }
+        if (audioChunks.length === 0) return;
 
         const rawBuffer = Buffer.concat(audioChunks);
         const wavBuffer = addWavHeader(rawBuffer, 16000); 
@@ -110,30 +107,32 @@ async function saveFile() {
         const fileName = `scans/audio_${Date.now()}.wav`;
         const file = bucket.file(fileName);
 
-        // resumable: false is CRITICAL on Render to prevent JWT timeout errors
-        console.log(`📤 Uploading ${wavBuffer.length} bytes to Firebase...`);
+        // 1. Create a random token (bypass key)
+        const downloadToken = "bypass_" + Date.now(); 
+
+        // 2. Save with the token in the metadata
         await file.save(wavBuffer, {
-            metadata: { contentType: 'audio/wav' },
+            metadata: { 
+                contentType: 'audio/wav',
+                metadata: {
+                    firebaseStorageDownloadTokens: downloadToken
+                }
+            },
             resumable: false 
         });
 
-        const [url] = await file.getSignedUrl({
-            action: 'read',
-            expires: '01-01-2030'
-        });
+        // 3. Construct the "Firebase Direct" URL
+        // This format bypasses the Google Cloud 'Signed URL' CORS bouncer
+        const url = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(fileName)}?alt=media&token=${downloadToken}`;
 
-        console.log("✅ File ready! URL sent to browser.");
+        console.log("✅ Bypass URL generated. Sending to website...");
 
-        if (browser && browser.readyState === WebSocket.OPEN) {
+        if (browser && browser.readyState === 1) { // 1 = OPEN
             browser.send(JSON.stringify({ audioUrl: url }));
         }
         audioChunks = [];
 
     } catch (error) {
         console.error("🔥 Firebase Save Error:", error.message);
-        // Hint for the user in the logs
-        if (error.message.includes("invalid_grant")) {
-            console.log("💡 The JWT signature is still failing. Re-check the 'key' content in Render settings.");
-        }
     }
 }
