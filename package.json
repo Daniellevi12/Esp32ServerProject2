@@ -1,13 +1,8 @@
 {
-  "name": "carsense-server",
-  "version": "1.0.0",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
   "dependencies": {
-    "@tensorflow/tfjs-node": "^4.15.0",
-    "firebase-admin": "^11.11.1",
-    "ws": "^8.14.2"
+    "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow/tfjs-backend-wasm": "^4.22.0",
+    "firebase-admin": "^13.6.0",
+    "ws": "^8.18.3"
   }
 }
