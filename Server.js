@@ -1,11 +1,30 @@
 const WebSocket = require('ws');
 const admin = require('firebase-admin');
+const fs = require('fs');
 const path = require('path');
 
-// --- 1. FIREBASE SETUP (Using Render Secret File) ---
-// Render places secret files in the root directory of your project
-const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
+// --- 1. FIREBASE SETUP (Render Secret File Fix) ---
+const possiblePaths = [
+    '/etc/secrets/serviceAccountKey.json', // Render standard secret path
+    './serviceAccountKey.json',             // Local root
+    '../serviceAccountKey.json'             // Parent directory
+];
 
+let serviceAccountPath = "";
+
+for (const p of possiblePaths) {
+    if (fs.existsSync(p)) {
+        serviceAccountPath = p;
+        break;
+    }
+}
+
+if (!serviceAccountPath) {
+    console.error("❌ ERROR: serviceAccountKey.json NOT FOUND!");
+    process.exit(1);
+}
+
+// Initialize Admin only ONCE
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccountPath),
     storageBucket: "carsense-abb24.firebasestorage.app"
@@ -19,7 +38,8 @@ let audioChunks = [];
 let browser = null;
 let esp32 = null;
 
-console.log(`🚀 CarSense Server active. Using Secret File: ${serviceAccountPath}`);
+console.log(`✅ Firebase Ready using: ${serviceAccountPath}`);
+console.log(`🚀 CarSense Server active on port ${PORT}`);
 
 // --- 2. WAV HEADER HELPER ---
 function addWavHeader(rawBuffer, sampleRate) {
@@ -55,8 +75,10 @@ wss.on('connection', (ws, req) => {
             const msgStr = data.toString().trim();
             if (msgStr === "START") {
                 audioChunks = [];
+                console.log("⏺️ Start Command Received");
                 if (esp32 && esp32.readyState === 1) esp32.send("START");
             } else if (msgStr === "STOP") {
+                console.log("⏹️ Stop Command Received");
                 if (esp32 && esp32.readyState === 1) esp32.send("STOP");
                 saveFile();
             }
@@ -66,6 +88,7 @@ wss.on('connection', (ws, req) => {
     });
 
     ws.on('close', () => {
+        console.log(`❌ ${type} disconnected`);
         if (type === "ESP32") esp32 = null;
         if (type === "Browser") browser = null;
     });
@@ -74,14 +97,19 @@ wss.on('connection', (ws, req) => {
 // --- 4. FIREBASE UPLOAD ---
 async function saveFile() {
     try {
-        if (audioChunks.length === 0) return;
+        if (audioChunks.length === 0) {
+            console.log("⚠️ No audio data to save.");
+            return;
+        }
 
+        console.log(`📦 Concatenating ${audioChunks.length} chunks...`);
         const rawBuffer = Buffer.concat(audioChunks);
         const wavBuffer = addWavHeader(rawBuffer, 16000); 
 
         const fileName = `scans/audio_${Date.now()}.wav`;
         const file = bucket.file(fileName);
 
+        console.log("📤 Uploading to Firebase...");
         await file.save(wavBuffer, {
             metadata: { contentType: 'audio/wav' },
             resumable: false 
@@ -92,7 +120,7 @@ async function saveFile() {
             expires: '01-01-2030'
         });
 
-        console.log("✅ File Uploaded Successfully!");
+        console.log("✅ File Uploaded! URL sent to Browser.");
 
         if (browser && browser.readyState === WebSocket.OPEN) {
             browser.send(JSON.stringify({ audioUrl: url }));
