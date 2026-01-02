@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const admin = require('firebase-admin');
 const tf = require('@tensorflow/tfjs-node');
 
-// --- 1. FIREBASE SETUP (PASTE YOUR JSON HERE) ---
+// --- 1. FIREBASE SETUP ---
 const serviceAccount = {
   "type": "service_account",
   "project_id": "carsense-abb24",
@@ -13,8 +13,7 @@ const serviceAccount = {
   "auth_uri": "https://accounts.google.com/o/oauth2/auth",
   "token_uri": "https://oauth2.googleapis.com/token",
   "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40carsense-abb24.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40carsense-abb24.iam.gserviceaccount.com"
 };
 
 admin.initializeApp({
@@ -24,144 +23,114 @@ admin.initializeApp({
 });
 
 const bucket = admin.storage().bucket();
-const db = admin.database();
 
-// --- 2. AI SETUP ---
+// --- 2. AI CONFIG ---
 const MODEL_URL = 'https://teachablemachine.withgoogle.com/models/7KA0738CC/model.json';
 const LABELS = ['Background Noise', 'Car Horn']; 
 let model;
 (async () => {
-    try { 
-        model = await tf.loadLayersModel(MODEL_URL); 
-        console.log("✅ SYSTEM: AI Model Loaded"); 
-    } catch (e) { console.error("❌ SYSTEM: Model Load Failed", e); }
+    try { model = await tf.loadLayersModel(MODEL_URL); console.log("✅ SYSTEM: AI Model Loaded"); }
+    catch (e) { console.error("❌ SYSTEM: Model Load Failed", e); }
 })();
 
 // --- 3. SERVER LOGIC ---
 const port = process.env.PORT || 10000;
 const wss = new WebSocket.Server({ port: port }, () => {
-    console.log(`🚀 SYSTEM: Server started on port ${port}`);
+    console.log(`🚀 SYSTEM: Server active on port ${port}`);
 });
 
-// GLOBAL CLIENT HOLDERS
-let esp32Client = null;
-let browserClient = null;
+let esp32 = null;
+let browser = null;
 let audioChunks = [];
 
 wss.on('connection', (ws, req) => {
-    const url = req.url;
-    console.log(`🔌 CONNECTION ATTEMPT: ${url}`);
-
-    if (url.includes("ESP32")) {
-        esp32Client = ws;
-        console.log("✅ CLIENT IDENTIFIED: ESP32 Connected");
-    } else if (url.includes("Browser")) {
-        browserClient = ws;
-        console.log("✅ CLIENT IDENTIFIED: Browser Connected");
-    } else {
-        console.log("⚠️ UNKNOWN CLIENT CONNECTED");
-    }
+    const isESP = req.url.includes("ESP32");
+    const isBrowser = req.url.includes("Browser");
+    
+    if (isESP) { esp32 = ws; console.log("✅ CLIENT: ESP32 Connected"); }
+    if (isBrowser) { browser = ws; console.log("✅ CLIENT: Browser Connected"); }
 
     ws.on('message', async (message) => {
-        // --- CASE 1: BINARY AUDIO DATA ---
-        if (Buffer.isBuffer(message)) {
-            if (ws === esp32Client) {
-                audioChunks.push(message);
-                if (audioChunks.length % 50 === 0) {
-                    const totalSize = Buffer.concat(audioChunks).length;
-                    console.log(`🎤 AUDIO: Receiving... Total Buffer: ${totalSize} bytes`);
+        // --- LOGIC FIX: Don't use Buffer.isBuffer() for routing ---
+        
+        // 1. IF FROM BROWSER -> IT IS A COMMAND
+        if (isBrowser) {
+            const cmd = message.toString().trim();
+            console.log(`📩 BROWSER CMD: ${cmd}`);
+
+            if (cmd === "START_RECORDING") {
+                audioChunks = [];
+                if (esp32 && esp32.readyState === WebSocket.OPEN) {
+                    esp32.send("START");
+                    console.log("👉 ACTION: Sent START to ESP32");
+                } else {
+                    console.log("❌ ERROR: ESP32 Offline");
+                    ws.send(JSON.stringify({error: "ESP32 Offline"}));
                 }
             }
             return;
         }
 
-        // --- CASE 2: TEXT COMMANDS ---
-        const msgString = message.toString().trim();
-        console.log(`📩 MESSAGE RECEIVED: [${msgString}]`);
-
-        // FROM BROWSER: START
-        if (msgString === "START_RECORDING") {
-            console.log("👉 ACTION: Browser requested Start");
-            audioChunks = []; // Reset buffer
-
-            if (esp32Client && esp32Client.readyState === WebSocket.OPEN) {
-                esp32Client.send("START");
-                console.log("📤 SENT: 'START' command sent to ESP32");
-            } else {
-                console.log("❌ ERROR: ESP32 is NOT connected or NOT ready");
-                if (browserClient) browserClient.send(JSON.stringify({ error: "ESP32 Offline" }));
+        // 2. IF FROM ESP32
+        if (isESP) {
+            // Check if it's the short "STOP" text command
+            if (message.length < 50) { 
+                const text = message.toString().trim();
+                if (text === "STOP") {
+                    console.log("🛑 ESP32 SAYS STOP. Processing...");
+                    if (audioChunks.length > 0) {
+                        const fullAudio = Buffer.concat(audioChunks);
+                        processAndUpload(fullAudio);
+                    } else {
+                        console.log("⚠️ Audio buffer empty.");
+                    }
+                    audioChunks = [];
+                    return;
+                }
             }
-        }
 
-        // FROM ESP32: STOP (Recording Done)
-        if (msgString === "STOP") {
-            console.log("🛑 ACTION: ESP32 sent STOP. Processing Audio...");
-            const fullAudio = Buffer.concat(audioChunks);
-            console.log(`📊 PROCESSING: Final Audio Size: ${fullAudio.length} bytes`);
-            
-            // Process even if small, just to test flow
-            if (fullAudio.length > 1000) { 
-                processAndUpload(fullAudio);
-            } else {
-                console.log("❌ ERROR: Audio file too small/empty");
-                if (browserClient) browserClient.send(JSON.stringify({ error: "Audio Empty" }));
+            // Otherwise, it is AUDIO DATA
+            audioChunks.push(message);
+            if (audioChunks.length % 50 === 0) {
+                 console.log(`🎤 Receiving Audio... Total: ${Buffer.concat(audioChunks).length} bytes`);
             }
-            audioChunks = []; // clear memory
         }
     });
 
     ws.on('close', () => {
-        if (ws === esp32Client) {
-            console.log("❌ DISCONNECT: ESP32 went offline");
-            esp32Client = null;
-        } else if (ws === browserClient) {
-            console.log("❌ DISCONNECT: Browser went offline");
-            browserClient = null;
-        }
+        if (isESP) { esp32 = null; console.log("⚠️ ESP32 Disconnected"); }
+        if (isBrowser) { browser = null; console.log("⚠️ Browser Disconnected"); }
     });
 });
 
 async function processAndUpload(buffer) {
     try {
-        console.log("🧠 AI: Starting Inference...");
-        const float32 = new Float32Array(buffer.length / 2);
-        for (let i = 0; i < float32.length; i++) {
-            float32[i] = buffer.readInt16LE(i * 2) / 32768.0;
-        }
+        console.log(`📊 Processing ${buffer.length} bytes of audio...`);
         
-        // Pad or Trim to 1 second (16000 samples) for simple test
-        const inputTensor = tf.tensor(float32.slice(0, 16000), [1, 16000]);
-        const prediction = await model.predict(inputTensor).data();
+        // AI Inference
+        const float32 = new Float32Array(buffer.length / 2);
+        for (let i = 0; i < float32.length; i++) float32[i] = buffer.readInt16LE(i * 2) / 32768.0;
+
+        const input = tf.tensor(float32.slice(0, 16000), [1, 16000]);
+        const prediction = await model.predict(input).data();
         const maxIdx = prediction.indexOf(Math.max(...prediction));
-        const resultLabel = LABELS[maxIdx];
-        const conf = (prediction[maxIdx] * 100).toFixed(1);
-
-        console.log(`🧠 AI RESULT: ${resultLabel} (${conf}%)`);
-
+        
         // Upload
-        console.log("☁️ FIREBASE: Uploading...");
         const fileName = `scans/scan_${Date.now()}.wav`;
         const file = bucket.file(fileName);
-        
         await file.save(buffer, { metadata: { contentType: 'audio/wav' } });
         await file.makePublic();
         
-        const publicUrl = `https://storage.googleapis.com/${bucket.name}/${fileName}`;
-        console.log(`☁️ URL GENERATED: ${publicUrl}`);
-
-        const payload = {
-            label: resultLabel,
-            confidence: conf,
-            audioUrl: publicUrl
+        const result = {
+            label: LABELS[maxIdx],
+            confidence: (prediction[maxIdx] * 100).toFixed(1),
+            audioUrl: `https://storage.googleapis.com/${bucket.name}/${fileName}`
         };
 
-        // Notify Browser
-        if (browserClient && browserClient.readyState === WebSocket.OPEN) {
-            browserClient.send(JSON.stringify(payload));
-            console.log("✅ SUCCESS: Result sent to Browser");
-        }
+        if (browser) browser.send(JSON.stringify(result));
+        console.log("✅ Result sent to browser:", result);
 
     } catch (err) {
-        console.error("❌ CRITICAL ERROR:", err);
+        console.error("❌ PROCESSING ERROR:", err);
     }
 }
