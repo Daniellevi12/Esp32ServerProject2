@@ -2,8 +2,7 @@ const WebSocket = require('ws');
 const admin = require('firebase-admin');
 const tf = require('@tensorflow/tfjs-node');
 
-// --- 1. FIREBASE ADMIN SETUP ---
-// PASTE YOUR JSON VALUES HERE
+// 1. FIREBASE SETUP
 const serviceAccount = {
   "type": "service_account",
   "project_id": "carsense-abb24",
@@ -14,8 +13,7 @@ const serviceAccount = {
   "auth_uri": "https://accounts.google.com/o/oauth2/auth",
   "token_uri": "https://oauth2.googleapis.com/token",
   "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40carsense-abb24.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40carsense-abb24.iam.gserviceaccount.com"
 };
 
 admin.initializeApp({
@@ -27,133 +25,102 @@ admin.initializeApp({
 const db = admin.database();
 const bucket = admin.storage().bucket();
 
-// --- 2. AI CONFIGURATION ---
+// 2. AI LOAD
 const MODEL_URL = 'https://teachablemachine.withgoogle.com/models/7KA0738CC/model.json';
 const LABELS = ['Background Noise', 'Car Horn']; 
 let model;
+(async () => {
+    try { model = await tf.loadLayersModel(MODEL_URL); console.log("✅ AI Loaded"); }
+    catch (e) { console.log("❌ AI Error", e); }
+})();
 
-async function loadModel() {
-    try {
-        model = await tf.loadLayersModel(MODEL_URL);
-        console.log("✅ AI Model Loaded Successfully");
-    } catch (err) {
-        console.error("❌ AI Model failed to load:", err);
-    }
-}
-loadModel();
-
-// --- 3. SERVER LOGIC & PORT BINDING ---
+// 3. SERVER LOGIC
 const port = process.env.PORT || 10000;
-const wss = new WebSocket.Server({ port: port }, () => {
-    console.log(`🚀 Server active on port ${port}`);
-});
+const wss = new WebSocket.Server({ port: port }, () => console.log(`🚀 Server on ${port}`));
 
 let esp32 = null;
 let browser = null;
 let audioBuffer = [];
 
 wss.on('connection', (ws, req) => {
-    // Determine connection type via URL query ?type=ESP32
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const isESP = url.searchParams.get('type') === 'ESP32';
+    const isESP = req.url.includes("ESP32");
     const type = isESP ? "ESP32" : "Browser";
     
-    if (isESP) {
-        esp32 = ws;
-        console.log("ESP32: Online");
-    } else {
-        browser = ws;
-        console.log("Browser: Online");
-    }
+    if (isESP) { esp32 = ws; console.log("ESP32 Connected"); }
+    else { browser = ws; console.log("Browser Connected"); }
 
     ws.on('message', async (data) => {
-        // A. Handle Binary Audio (ESP32 data)
+        // A. HANDLE BINARY AUDIO
         if (Buffer.isBuffer(data)) {
             if (isESP) {
                 audioBuffer.push(data);
-                let currentSize = Buffer.concat(audioBuffer).length;
-
-                if (audioBuffer.length % 50 === 0) {
-                    console.log(`Receiving Audio: ${currentSize} bytes...`);
-                }
-
-                // If we have ~9.5s of data, process it
-                if (currentSize >= 304000) { 
-                    console.log(`✅ Buffer Full (${currentSize} bytes). Starting AI...`);
-                    const finalBuffer = Buffer.concat(audioBuffer);
-                    processAndUpload(finalBuffer);
-                    audioBuffer = []; 
+                // Lowered threshold to ensure we don't hang if bytes are short
+                if (Buffer.concat(audioBuffer).length >= 310000) {
+                     console.log("✅ Buffer Full - Auto Processing");
+                     const full = Buffer.concat(audioBuffer);
+                     processAndUpload(full);
+                     audioBuffer = [];
                 }
             }
-            return; 
+            return;
         }
 
-        // B. Handle Text Commands (Browser commands)
+        // B. HANDLE COMMANDS
         const msg = data.toString().trim();
-        console.log(`Incoming Command: [${msg}] from ${type}`);
+        console.log(`Msg from ${type}: ${msg}`);
 
         if (msg === "START_RECORDING") {
-            audioBuffer = []; 
+            audioBuffer = []; // Clear old data
             if (esp32 && esp32.readyState === WebSocket.OPEN) {
-                console.log("Action: Pinging ESP32 to start...");
                 esp32.send("START");
+                console.log("Sent START to ESP32");
             } else {
-                console.log("Error: ESP32 is offline, cannot start.");
                 ws.send(JSON.stringify({error: "ESP32 Offline"}));
             }
         }
+        
+        // NEW: FORCE STOP COMMAND
+        if (msg === "STOP" && isESP) {
+            console.log(`✋ STOP received. Processing ${Buffer.concat(audioBuffer).length} bytes...`);
+            if (audioBuffer.length > 0) {
+                processAndUpload(Buffer.concat(audioBuffer));
+                audioBuffer = [];
+            }
+        }
     });
 
-    ws.on('close', () => {
-        console.log(`${type} disconnected.`);
-        if (type === "ESP32") esp32 = null;
-        if (type === "Browser") browser = null;
-    });
+    ws.on('close', () => console.log(`${type} disconnected`));
 });
 
-// --- 4. DATA PROCESSING & FIREBASE ---
 async function processAndUpload(rawBuffer) {
+    console.log("Processing started...");
     try {
-        // Convert to Float32 for AI
+        // AI Inference
         const float32 = new Float32Array(rawBuffer.length / 2);
-        for (let i = 0; i < float32.length; i++) {
-            float32[i] = rawBuffer.readInt16LE(i * 2) / 32768.0;
-        }
-
-        // Run Inference
+        for (let i = 0; i < float32.length; i++) float32[i] = rawBuffer.readInt16LE(i * 2) / 32768.0;
+        
         const input = tf.tensor(float32.subarray(0, 16000), [1, 16000]);
         const prediction = await model.predict(input).data();
         const maxIdx = prediction.indexOf(Math.max(...prediction));
         
-        const result = { 
-            label: LABELS[maxIdx], 
-            confidence: (prediction[maxIdx] * 100).toFixed(1) 
-        };
-
-        // Upload to Storage
+        // Upload
         const fileName = `scans/scan_${Date.now()}.wav`;
         const file = bucket.file(fileName);
-        
-        await file.save(rawBuffer, { 
-            metadata: { contentType: 'audio/wav' }
-        });
-
-        // Make it public and get URL
+        await file.save(rawBuffer, { metadata: { contentType: 'audio/wav' } });
         await file.makePublic();
-        const publicUrl = `https://storage.googleapis.com/${bucket.name}/${fileName}`;
-
-        const scanData = { ...result, audioUrl: publicUrl, timestamp: Date.now() };
         
-        // Save to Database
-        await db.ref('latest_scan').set(scanData);
-        
-        // Send to Website
-        if (browser && browser.readyState === WebSocket.OPEN) {
-            browser.send(JSON.stringify(scanData));
-        }
-        console.log("✅ Analysis complete. Result sent to dashboard.");
+        const result = { 
+            label: LABELS[maxIdx], 
+            confidence: (prediction[maxIdx] * 100).toFixed(1),
+            audioUrl: `https://storage.googleapis.com/${bucket.name}/${fileName}`
+        };
 
-    } catch (error) {
-        console.error("❌ Critical Processing Error:", error);
+        // Notify Browser
+        if (browser) browser.send(JSON.stringify(result));
+        console.log("✅ Result sent:", result);
+
+    } catch (err) {
+        console.error("❌ Process Error:", err);
+        if (browser) browser.send(JSON.stringify({error: "Processing Failed"}));
     }
 }
