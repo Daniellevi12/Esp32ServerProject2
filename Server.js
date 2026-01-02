@@ -5,17 +5,7 @@ const tf = require('@tensorflow/tfjs-node');
 // --- 1. FIREBASE ADMIN SETUP (NO JSON FILE NEEDED) ---
 // This looks for the text you pasted into Render's Dashboard
 const serviceAccount = {
-  "type": "service_account",
-  "project_id": "carsense-abb24",
-  "private_key_id": "1ce2687e7102d13da09a5eab63bf7a894585554f",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCY6oxZUzU793zh\n2Rn3R+L4rXKCyZgOfRER6ZX7xxnPSSsrSRuV1aZkcUtzvxp45K+F1TxGFRAUkJK8\nkqehbPpYqp03b8EYnSsuiYWTDYy/7emNoEIdLlurY34HTlRfMVd6CR8ZJ0JpMvEV\nx3O1Rp/8vR6rlKbwragbTXHLqMR4QiqO0tJfv4af6VUdHHCGiBVhAJ+e1MVQYZis\nhzGVrULDguPA8a2jnK+hrZiiihLN0ztg/Qt3BGk8/tvZVZ40/ByzRGOEaYxCA4Re\nE/+4XEHbcxUpa3cW33jX3v636i6jTVjy48jDK5uKVkOG3GqURTU0KOguweWgg++U\nU4t/LxtZAgMBAAECggEAI07xJkT4w0ZzjwCepsLyDSKbkMh0tE+7i8vIRnEkLAFE\nlwOT+4ZwG7wvRGQpfCWtw7THbJU7d8wkHaetTjBIJAYNNDo5N3I/AMlfTuOvjrek\nGIAbE/raztmzxYMYJzzQ6oxFony2sGzDTxiVRpOuqGCQvuSdoXAvo1JABtsKtouR\nPOWHW5q7HhrFFxka1kOthL9pOqRHjdDDmjeIe+K1QyAO0H6Vg8ktYCghec4di3yq\nccQ8sp+QLK9Wflq/HqgJN2TL3/B3nXWo9wTy2nRSzn+rR7nLFfxImg/c0ZyI8jNQ\nkbGdFaPakUi4VFWjZi7S6ktEWQOHeeIjo7Sr1Gu4SwKBgQDKGLcJab2vCYfmRvs0\n6rOUMgCWAPAczIBmmLYnClZsJW+2gPNmdpT/bXzdSZwctAOYP4Zdll9xyF8ewx3J\nGXJODr0culDFLwef9U/2cHEL+GS5xV/0RkPHohZl0poa2PLfULulS7UAKVM9WC9S\nW1945CAG6cTTYxiMapyhHHAgDwKBgQDBs8Rv4YtXdYd8JwzSxDHBjg8roMKxkHPG\nvxFBbwIQSF3mtEi2tHdUsWLfTC5M00VoXq8ZSZGxXyoNBqIdilOdcKsenZCZ+Vuv\n9E8bQ/2yVUXvECazPoNfSn/UbYy7qiN7Kg7rL+vfqbvvn02cHKz6BChnH1DjSaG7\ny4FytAYmFwKBgCKmzDOD+u8ZPkEAqK/xEit1y13s+T6m3dk5k/nrrtfKL3Zmc9V8\nvZ1yQ3eZ2HefcgJX2g0P7HuQ9KZMpD3H7C5wHoLfe1vj7XXC1RwXOXro8zRbIFG8\n/oArTZXV33B9BF+/8vyrl3RYoZoiFbMUUbFjxA4LZSEtm5bv7L0/KAaHAoGAeytd\nSKtJmHZyjX6jR85buTEk8mAKDTDGfeV3Cn2U+Vea5h1Tc2Iz0xXswgLGGjHpm6FB\nhDnku73AloHWSiRwYNeI6DHXBiGqrKsUNkk4o9JXYtmJUkb48HoF6MU0TQy1/RZU\nYDabrSBYEdnhVthhIaXNLy2ZmL10a17PVGmm00cCgYEAvupAkp0DxPkhY/E+Xr0o\nF7f3+RjImQltDepP3kOsYy2Rs+hGX35mi8htvM9DlDtUFmx4fBKiX6X05Fn62LOR\n+2kvqGSLHlCX0hh3djH4gVqliYUxfGahAI4wVTXnOjSMSAerReYEGFgppqnEtuqE\nmPqVKjZaYtYf3eRS6IU7UJ4=\n-----END PRIVATE KEY-----\n",
-  "client_email": "firebase-adminsdk-fbsvc@carsense-abb24.iam.gserviceaccount.com",
-  "client_id": "111566575451857240436",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40carsense-abb24.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
+
 }
 
 admin.initializeApp({
@@ -51,7 +41,6 @@ let audioBuffer = [];
 console.log("🚀 Render Server Started...");
 
 wss.on('connection', (ws, req) => {
-    // Detect if it's the ESP32 or the Browser connecting
     const type = req.url.includes("ESP32") ? "ESP32" : "Browser";
     
     if (type === "ESP32") {
@@ -63,36 +52,47 @@ wss.on('connection', (ws, req) => {
     }
 
     ws.on('message', async (data) => {
-        const msg = data.toString();
-
-        // If Website clicks "Start"
-        if (msg === "START_RECORDING") {
-            console.log("Action: Website requested scan. Pinging ESP32...");
-            audioBuffer = []; // Clear old data
-            if (esp32 && esp32.readyState === WebSocket.OPEN) {
-                esp32.send("START");
-            } else {
-                console.log("Error: ESP32 not online");
-                if(browser) browser.send(JSON.stringify({error: "ESP32 Offline"}));
+        // Handle Text Commands
+        if (!Buffer.isBuffer(data)) {
+            const msg = data.toString();
+            if (msg === "START_RECORDING") {
+                console.log("Action: Website requested scan.");
+                audioBuffer = []; 
+                if (esp32 && esp32.readyState === WebSocket.OPEN) {
+                    esp32.send("START");
+                } else {
+                    if(browser) browser.send(JSON.stringify({label: "Error", confidence: "0", error: "ESP32 Offline"}));
+                }
             }
-        } 
-        
-        // If it's incoming audio from the ESP32
-        else if (Buffer.isBuffer(data) && type === "ESP32") {
+            return;
+        }
+
+        // Handle Audio from ESP32
+        if (type === "ESP32") {
             audioBuffer.push(data);
             
-            // Check if we have 10 seconds of 16-bit 16kHz audio
-            // 16000 samples * 2 bytes per sample = 320,000 bytes
-            const currentSize = Buffer.concat(audioBuffer).length;
-            if (currentSize >= 320000) {
-                console.log("Action: 10s Audio Received. Starting AI...");
-                processAndUpload(Buffer.concat(audioBuffer).subarray(0, 320000));
-                audioBuffer = []; // Reset for next time
+            // LOGGING: See how much data we are getting
+            let currentSize = Buffer.concat(audioBuffer).length;
+            
+            // If we have at least 9.5 seconds of audio, process it.
+            // (16000 samples/sec * 2 bytes * 9.5 sec = 304,000)
+            if (currentSize >= 304000) { 
+                console.log(`Action: Audio received (${currentSize} bytes). Analyzing...`);
+                const fullBuffer = Buffer.concat(audioBuffer);
+                processAndUpload(fullBuffer);
+                audioBuffer = []; // Clear for next time
             }
         }
     });
 
-    ws.on('close', () => console.log(`${type} Disconnected`));
+    ws.on('close', () => {
+        console.log(`${type} Disconnected`);
+        // Fallback: If ESP32 disconnects but we have audio, process it
+        if (type === "ESP32" && audioBuffer.length > 50) {
+            processAndUpload(Buffer.concat(audioBuffer));
+            audioBuffer = [];
+        }
+    });
 });
 
 async function processAndUpload(rawBuffer) {
