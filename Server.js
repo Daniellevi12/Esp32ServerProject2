@@ -50,53 +50,43 @@ let audioBuffer = [];
 
 console.log("🚀 Render Server Started...");
 
-wss.on('connection', (ws, req) => {
-    // Improved detection: Check for ?type=ESP32 in the URL
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const isESP = url.searchParams.get('type') === 'ESP32';
-    const type = isESP ? "ESP32" : "Browser";
-    
-    if (isESP) {
-        esp32 = ws;
-        console.log("ESP32: Online and Linked");
-    } else {
-        browser = ws;
-        console.log("Browser: Dashboard Connected");
-    }
+ws.on('message', async (data) => {
+        // 1. CHECK IF DATA IS A BINARY BUFFER (AUDIO)
+        if (Buffer.isBuffer(data)) {
+            if (type === "ESP32") {
+                audioBuffer.push(data);
+                let currentSize = Buffer.concat(audioBuffer).length;
 
-    // Attach the message listener to EVERY connection immediately
-    ws.on('message', async (data) => {
-        // Convert buffer/blob to string for command checking
+                // Every time we get a chunk, let's log the progress
+                if (audioBuffer.length % 100 === 0) {
+                    console.log(`Audio Progress: ${currentSize} bytes received...`);
+                }
+
+                if (currentSize >= 304000) { 
+                    console.log(`✅ Success: 10s Audio Received (${currentSize} bytes). Analyzing...`);
+                    processAndUpload(Buffer.concat(audioBuffer));
+                    audioBuffer = []; 
+                }
+            }
+            return; // Exit here so we don't treat binary as a command
+        }
+
+        // 2. CHECK IF DATA IS A TEXT COMMAND
         const msg = data.toString().trim();
-        console.log(`Log: Received message [${msg}] from ${type}`);
+        console.log(`Command Received: [${msg}] from ${type}`);
 
         if (msg === "START_RECORDING") {
-            console.log("Action: Valid Start Command Received");
             audioBuffer = []; 
             if (esp32 && esp32.readyState === WebSocket.OPEN) {
-                console.log("Signal: Pinging ESP32...");
+                console.log("Action: Triggering ESP32...");
                 esp32.send("START");
             } else {
-                console.log("Error: ESP32 is not currently connected to server.");
+                console.log("Error: ESP32 not connected");
                 ws.send(JSON.stringify({error: "ESP32 Offline"}));
-            }
-        } 
-        
-        // Handle binary audio data
-        else if (Buffer.isBuffer(data) && isESP) {
-            audioBuffer.push(data);
-            let currentSize = Buffer.concat(audioBuffer).length;
-            if (currentSize >= 304000) { 
-                console.log(`Action: 10s Audio complete (${currentSize} bytes). Analyzing...`);
-                processAndUpload(Buffer.concat(audioBuffer));
-                audioBuffer = []; 
             }
         }
     });
 
-    ws.on('close', () => console.log(`${type} session ended.`));
-    ws.on('error', (err) => console.error(`${type} WebSocket Error:`, err));
-});
 async function processAndUpload(rawBuffer) {
     try {
         // 1. Convert Buffer to Float32 for AI
